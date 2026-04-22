@@ -1,7 +1,8 @@
-import { LoaderCircle, X } from "lucide-react";
+import { CheckCircle2, LoaderCircle, X, XCircle } from "lucide-react";
 
 const TOTAL = 10;
 
+// Case- and whitespace-insensitive equality used to compare quiz answers.
 function normalizeAnswer(a, b) {
   return (a || "").trim().toLowerCase() === (b || "").trim().toLowerCase();
 }
@@ -47,37 +48,73 @@ function QuizModal({
         {!loading && questions.length === TOTAL && !result && (
           <div className="quiz-modal-body">
             <p className="quiz-modal-hint">
-              Answer all {TOTAL} questions. Topics for this day are all covered across these questions.
+              Pick an answer for each question — feedback appears immediately. Submit when all {TOTAL} are answered.
             </p>
             <ol className="quiz-question-list">
-              {questions.map((q, idx) => (
-                <li key={idx} className="quiz-question-item">
-                  <p className="quiz-q-text">
-                    <strong>Q{idx + 1}.</strong> {q.question}
-                    {q.topic_covered ? (
-                      <span className="quiz-topic-tag">{q.topic_covered}</span>
-                    ) : null}
-                  </p>
-                  <div className="quiz-options">
-                    {q.options.map((opt) => (
-                      <label key={opt} className="quiz-option">
-                        <input
-                          type="radio"
-                          name={`q-${idx}`}
-                          checked={answers[idx] === opt}
-                          onChange={() =>
-                            setAnswers((prev) => ({
-                              ...prev,
-                              [idx]: opt,
-                            }))
-                          }
-                        />
-                        <span>{opt}</span>
-                      </label>
-                    ))}
-                  </div>
-                </li>
-              ))}
+              {questions.map((q, idx) => {
+                const picked = answers[idx];
+                const locked = picked !== undefined;
+                const pickedIsCorrect = locked && normalizeAnswer(picked, q.answer);
+                return (
+                  <li key={idx} className="quiz-question-item">
+                    <p className="quiz-q-text">
+                      <strong>Q{idx + 1}.</strong> {q.question}
+                      {q.topic_covered ? (
+                        <span className="quiz-topic-tag">{q.topic_covered}</span>
+                      ) : null}
+                    </p>
+                    <div className="quiz-options">
+                      {q.options.map((opt) => {
+                        const isPicked = picked === opt;
+                        const isCorrect = normalizeAnswer(opt, q.answer);
+                        let stateClass = "";
+                        if (locked) {
+                          if (isCorrect) stateClass = "correct";
+                          else if (isPicked) stateClass = "wrong";
+                          else stateClass = "muted";
+                        }
+                        return (
+                          <label
+                            key={opt}
+                            className={`quiz-option ${stateClass}`.trim()}
+                          >
+                            <input
+                              type="radio"
+                              name={`q-${idx}`}
+                              checked={isPicked}
+                              disabled={locked}
+                              onChange={() => {
+                                if (locked) return;
+                                setAnswers((prev) => ({
+                                  ...prev,
+                                  [idx]: opt,
+                                }));
+                              }}
+                            />
+                            <span className="quiz-option-text">{opt}</span>
+                            {locked && isCorrect && (
+                              <CheckCircle2 size={16} className="quiz-option-icon correct" />
+                            )}
+                            {locked && isPicked && !isCorrect && (
+                              <XCircle size={16} className="quiz-option-icon wrong" />
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {locked && (
+                      <div
+                        className={`quiz-explanation ${pickedIsCorrect ? "ok" : "bad"}`}
+                      >
+                        <strong>
+                          {pickedIsCorrect ? "Correct." : `Incorrect — answer: ${q.answer}.`}
+                        </strong>{" "}
+                        {q.explanation}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ol>
             <button
               type="button"

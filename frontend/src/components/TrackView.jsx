@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import {
   AlarmClock,
   BrainCircuit,
@@ -26,16 +27,64 @@ function TrackView({
   saveDayProgress,
   saveQuizScore,
   onOpenQuiz,
+  onLoadDayResources,
   quizLoadingDay,
   hours,
   planId,
 }) {
-  if (!plan.length) {
-    return <p className="message err">Generate a plan first to access tracking.</p>;
+  const [resourceLoadingDay, setResourceLoadingDay] = useState(null);
+  // Remembers (planId, day) pairs already requested so a failure can't trigger a retry storm.
+  const attemptedRef = useRef(new Set());
+  const timelineRef = useRef(null);
+  const lastPlanIdRef = useRef(null);
+
+  const hasPlan = plan.length > 0;
+  const normalizedTargetDay = hasPlan
+    ? Math.max(1, Math.min(Number(targetDay) || 1, plan.length))
+    : 1;
+  const selectedDay = hasPlan
+    ? plan.find((d) => d.day === normalizedTargetDay) || plan[0]
+    : null;
+  const selectedDayNumber = selectedDay?.day ?? null;
+  const resourcesForDay = Array.isArray(selectedDay?.resources) ? selectedDay.resources : [];
+
+  // True only when every resource for the day is already an http(s) URL.
+  const allResourcesAreUrls =
+    resourcesForDay.length > 0 &&
+    resourcesForDay.every(
+      (r) => typeof r === "string" && /^https?:\/\//i.test(r.trim())
+    );
+
+  // Lazily fetch resolved URLs for the selected day if it's still holding raw queries.
+  useEffect(() => {
+    if (!planId || !selectedDayNumber || !onLoadDayResources) return;
+    if (allResourcesAreUrls) return;
+    const key = `${planId}::${selectedDayNumber}`;
+    if (attemptedRef.current.has(key)) return;
+    attemptedRef.current.add(key);
+    setResourceLoadingDay(selectedDayNumber);
+    Promise.resolve(onLoadDayResources(selectedDayNumber)).finally(() => {
+      setResourceLoadingDay((cur) => (cur === selectedDayNumber ? null : cur));
+    });
+  }, [planId, selectedDayNumber, onLoadDayResources, allResourcesAreUrls]);
+
+  // Reset the per-day "already attempted" memory whenever a new plan is selected.
+  useEffect(() => {
+    attemptedRef.current = new Set();
+  }, [planId]);
+
+  // Scroll the timeline back to Day 1 whenever a new plan is loaded.
+  useEffect(() => {
+    if (planId && planId !== lastPlanIdRef.current) {
+      lastPlanIdRef.current = planId;
+      if (timelineRef.current) timelineRef.current.scrollTop = 0;
+    }
+  }, [planId]);
+
+  if (!hasPlan) {
+    return <p className="message err">Generating a plan…</p>;
   }
 
-  const normalizedTargetDay = Math.max(1, Math.min(Number(targetDay) || 1, plan.length));
-  const selectedDay = plan.find((d) => d.day === normalizedTargetDay) || plan[0];
   const dayProgress =
     progressByDay[selectedDay.day] || { isCompleted: false, completedTopics: [] };
   const dayQuiz =
@@ -48,8 +97,8 @@ function TrackView({
   const isAllTopicsComplete =
     topicsForDay.length > 0 && topicsForDay.every((t) => completedTopicSet.has(t));
 
+  // Save the new completed-topics list (in plan order) and toggle the day-done flag accordingly.
   const persistDayProgress = async (nextCompletedTopics) => {
-    // Keep completed topics in the same order as the plan's topic list.
     const nextSet = new Set(nextCompletedTopics);
     const normalizedCompleted = topicsForDay.filter((t) => nextSet.has(t));
     const nextIsCompleted = topicsForDay.length > 0 && normalizedCompleted.length === topicsForDay.length;
@@ -69,12 +118,12 @@ function TrackView({
     });
   };
 
+  // Pull the first http(s) URL from a string (or null) and trim trailing punctuation.
   const extractFirstHttpUrl = (text) => {
     const s = String(text || "").trim();
     if (!s) return null;
     const match = s.match(/(https?:\/\/[^\s\)\]\}>,"']+)/i);
     if (!match) return null;
-    // Avoid trailing punctuation commonly produced in text.
     return match[1].replace(/[.,;:]+$/g, "");
   };
 
@@ -108,7 +157,7 @@ function TrackView({
           <h3>
             <TrendingUp size={18} /> Study Timeline
           </h3>
-          <div className="timeline">
+          <div className="timeline" ref={timelineRef}>
             {plan.map((day, idx) => {
               const dayState = progressByDay[day.day];
               const done = Boolean(dayState?.isCompleted);
@@ -178,21 +227,29 @@ function TrackView({
             <h4>
               <Link size={14} /> Resources
             </h4>
-            <ul>
-              {selectedDay.resources.map((resource) => (
-                <li key={resource}>
-                  {(() => {
-                    const href = extractFirstHttpUrl(resource);
-                    if (!href) return <span>{resource}</span>;
-                    return (
-                      <a href={href} target="_blank" rel="noreferrer">
-                        {resource}
-                      </a>
-                    );
-                  })()}
-                </li>
-              ))}
-            </ul>
+            {resourceLoadingDay === selectedDay.day && resourcesForDay.length === 0 ? (
+              <p className="quiz-help">
+                <LoaderCircle className="spin" size={14} /> Finding good links for this day…
+              </p>
+            ) : resourcesForDay.length === 0 ? (
+              <p className="quiz-help">No resources yet for this day.</p>
+            ) : (
+              <ul>
+                {resourcesForDay.map((resource) => (
+                  <li key={resource}>
+                    {(() => {
+                      const href = extractFirstHttpUrl(resource);
+                      if (!href) return <span>{resource}</span>;
+                      return (
+                        <a href={href} target="_blank" rel="noreferrer">
+                          {resource}
+                        </a>
+                      );
+                    })()}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
           <div className="section">
