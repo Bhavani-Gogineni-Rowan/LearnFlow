@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import confetti from "canvas-confetti";
-import { Compass, ListChecks, Sparkles, User } from "lucide-react";
+import { Compass, History, ListChecks, Sparkles, User } from "lucide-react";
 import PlannerView from "./components/PlannerView";
 import TrackView from "./components/TrackView";
+import YourPlansView from "./components/YourPlansView";
 import { QuizModal, normalizeAnswer, TOTAL as QUIZ_TOTAL } from "./components/QuizModal";
 import "./App.css";
 
@@ -18,6 +19,7 @@ function App() {
   const [userId, setUserId] = useState("demo-user");
   const [textInput, setTextInput] = useState("");
   const [pdfFile, setPdfFile] = useState(null);
+  const [planName, setPlanName] = useState("");
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [message, setMessage] = useState("");
@@ -25,8 +27,11 @@ function App() {
 
   const [planId, setPlanId] = useState("");
   const [plan, setPlan] = useState([]);
+  const [planHours, setPlanHours] = useState(null);
   const [targetDay, setTargetDay] = useState(1);
   const [stats, setStats] = useState(null);
+  // Bumped to force-remount PlannerView so native inputs (like the file picker) reset.
+  const [formResetKey, setFormResetKey] = useState(0);
 
   const [progressByDay, setProgressByDay] = useState({});
   const [quizByDay, setQuizByDay] = useState({});
@@ -44,6 +49,7 @@ function App() {
   const planIdRef = useRef(planId);
   planIdRef.current = planId;
 
+  // Coerce the raw /users/:id/plans payload into the shape the UI expects.
   const normalizeSavedPlans = (rows) =>
     (Array.isArray(rows) ? rows : [])
       .filter((item) => item && typeof item === "object" && typeof item.plan_id === "string")
@@ -53,18 +59,30 @@ function App() {
         completion_percent: Number(item.completion_percent ?? 0),
         completed_days_count: Number(item.completed_days_count ?? 0),
         total_plan_days: Number(item.total_plan_days ?? 0),
+        average_quiz_percent: Number(item.average_quiz_percent ?? 0),
+        current_streak: Number(item.current_streak ?? 0),
+        unlocked_badges: Array.isArray(item.unlocked_badges) ? item.unlocked_badges : [],
+        plan_name: item.plan_name ? String(item.plan_name) : "",
         syllabus_preview: String(item.syllabus_preview ?? ""),
         created_at: item.created_at || null,
       }));
 
+  // Clear every Plan-tab form input and force the form component to remount.
+  const resetPlanForm = useCallback(() => {
+    setDays('');
+    setHours('');
+    setTextInput("");
+    setPdfFile(null);
+    setPlanName("");
+    setFormResetKey((k) => k + 1);
+  }, []);
+
+  // Hydrate Track-tab state from a /resume payload; never touches the Plan form.
   const applyResumePayload = useCallback((data) => {
     setPlanId(data.plan_id);
     setPlan(data.plan || []);
-    const dn = Number(data.days);
     const hn = Number(data.hours);
-    setDays(Number.isFinite(dn) && dn >= 1 ? dn : '');
-    setHours(Number.isFinite(hn) && hn >= 1 ? hn : '');
-    setTextInput(data.syllabus_text || "");
+    setPlanHours(Number.isFinite(hn) && hn >= 1 ? hn : null);
 
     const pb = {};
     Object.entries(data.progress_by_day || {}).forEach(([k, v]) => {
@@ -87,6 +105,7 @@ function App() {
     setQuizByDay(qb);
   }, []);
 
+  // Refresh the saved-plans list for the current user id.
   const fetchSavedPlansForUser = useCallback(async () => {
     const uid = userId.trim() || "demo-user";
     setSavedPlansLoading(true);
@@ -100,6 +119,7 @@ function App() {
     }
   }, [userId]);
 
+  // Debounced reload of saved plans whenever the user id changes.
   useEffect(() => {
     const t = setTimeout(() => {
       fetchSavedPlansForUser();
@@ -107,14 +127,13 @@ function App() {
     return () => clearTimeout(t);
   }, [fetchSavedPlansForUser]);
 
-  // When saved plans load for this user, hydrate Plan + KPIs from the same plan we show stats for
-  // (prefer current planId if it’s in the list, else newest). Uses a ref for planId so hydrating
-  // doesn’t retrigger this effect and double-fetch. Resume button still loads a chosen plan explicitly.
+  // Auto-hydrate Track-tab from the current (or newest) saved plan whenever the saved list changes.
   useEffect(() => {
     if (!savedPlans.length) {
       setStats(null);
       setPlanId("");
       setPlan([]);
+      setPlanHours(null);
       setProgressByDay({});
       setQuizByDay({});
       return undefined;
@@ -141,6 +160,38 @@ function App() {
     return () => ac.abort();
   }, [savedPlans, userId, applyResumePayload]);
 
+  // Delete a plan server-side, then clear it from local state if it was active.
+  const deletePlan = useCallback(
+    async (pid) => {
+      if (!pid) return;
+      const uid = userId.trim() || "demo-user";
+      setError("");
+      setMessage("");
+      try {
+        await api.delete(`/plans/${pid}`, { params: { user_id: uid } });
+        if (planIdRef.current === pid) {
+          setPlanId("");
+          setPlan([]);
+          setProgressByDay({});
+          setQuizByDay({});
+          setStats(null);
+          setTargetDay(1);
+        }
+        setSavedPlans((prev) => prev.filter((p) => p.plan_id !== pid));
+        setMessage("Plan deleted.");
+        await fetchSavedPlansForUser();
+      } catch (requestError) {
+        setError(
+          requestError?.response?.data?.detail ||
+            requestError?.message ||
+            "Could not delete this plan."
+        );
+      }
+    },
+    [userId, fetchSavedPlansForUser]
+  );
+
+  // Reopen a saved plan: load its full state + stats and switch to the Track tab.
   const resumePlan = async (pid) => {
     setError("");
     setMessage("");
@@ -189,6 +240,7 @@ function App() {
     return Math.round(all.reduce((sum, n) => sum + n, 0) / all.length);
   }, [quizByDay]);
 
+  // Submit the Plan form: stream the generated plan from the backend and persist it.
   const onGeneratePlan = async (e) => {
     e.preventDefault();
     setMessage("");
@@ -201,7 +253,21 @@ function App() {
       return;
     }
 
+    const trimmedPlanName = planName.trim();
+    if (pdfFile && !trimmedPlanName) {
+      setError("Plan Name is required when uploading a syllabus PDF.");
+      return;
+    }
+
     setIsGenerating(true);
+    setPlan([]);
+    setPlanId("");
+    setProgressByDay({});
+    setQuizByDay({});
+    setStats(null);
+    setTargetDay(1);
+    setPlanHours(hourNum);
+    setActiveView("track");
 
     try {
       const formData = new FormData();
@@ -209,34 +275,83 @@ function App() {
       formData.append("hours", String(hourNum));
       formData.append("user_id", userId.trim() || "demo-user");
       formData.append("text_input", textInput);
+      if (trimmedPlanName) {
+        formData.append("plan_name", trimmedPlanName);
+      }
       if (pdfFile) {
         formData.append("file", pdfFile);
       }
 
-      const { data } = await api.post("/generate-plan/", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
+      const response = await fetch(`${api.defaults.baseURL}/generate-plan/stream`, {
+        method: "POST",
+        body: formData,
       });
+      if (!response.ok || !response.body) {
+        const text = await response.text().catch(() => "");
+        throw new Error(text || `Request failed (${response.status}).`);
+      }
 
-      setPlanId(data.plan_id);
-      setPlan(data.plan || []);
-      setTargetDay(1);
-      setProgressByDay({});
-      setQuizByDay({});
-      setStats(null);
-      setMessage("Plan generated and saved successfully.");
-      confetti({ particleCount: 120, spread: 80, origin: { y: 0.7 } });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamError = "";
+      let donePlanId = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line) continue;
+          let evt;
+          try {
+            evt = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (evt.type === "init") {
+            setPlanId(evt.plan_id);
+            setMessage(`Generating ${evt.days}-day plan…`);
+          } else if (evt.type === "chunk") {
+            const incoming = Array.isArray(evt.days) ? evt.days : [];
+            setPlan((prev) => {
+              const seen = new Set(prev.map((d) => d.day));
+              const merged = [...prev];
+              for (const d of incoming) {
+                if (!seen.has(d.day)) merged.push(d);
+              }
+              merged.sort((a, b) => a.day - b.day);
+              return merged;
+            });
+          } else if (evt.type === "done") {
+            donePlanId = evt.plan_id;
+          } else if (evt.type === "error") {
+            streamError = evt.detail || "Plan generation failed.";
+          }
+        }
+      }
+
+      if (streamError) {
+        setError(streamError);
+      } else {
+        if (donePlanId) setPlanId(donePlanId);
+        setMessage("Plan generated and saved successfully.");
+        confetti({ particleCount: 120, spread: 80, origin: { y: 0.7 } });
+      }
       await fetchSavedPlansForUser();
     } catch (requestError) {
-      setError(
-        requestError?.response?.data?.detail ||
-          requestError?.message ||
-          "Failed to generate plan."
-      );
+      setError(requestError?.message || "Failed to generate plan.");
     } finally {
       setIsGenerating(false);
+      // Always blank the form so the next plan starts from a clean slate.
+      resetPlanForm();
     }
   };
 
+  // Upsert per-day progress (completed topics + done flag) and refresh stats.
   const saveDayProgress = async (day, overrides) => {
     try {
       const dayState = progressByDay[day.day] || { isCompleted: false, completedTopics: [] };
@@ -257,6 +372,7 @@ function App() {
     }
   };
 
+  // Persist the latest quiz score for one day and refresh stats.
   const saveQuizScore = async (day) => {
     try {
       const quizState = quizByDay[day.day] || { score: 0, weakTopics: "", totalQuestions: QUIZ_TOTAL };
@@ -279,6 +395,29 @@ function App() {
     }
   };
 
+  // Fetch resolved URLs for a day on demand and merge them into local plan state.
+  const loadDayResources = useCallback(async (dayNum) => {
+    const pid = planIdRef.current;
+    if (!pid) return;
+    try {
+      const { data } = await api.get(`/plans/${pid}/days/${dayNum}/resources`);
+      const urls = Array.isArray(data?.resources) ? data.resources : [];
+      setPlan((prev) =>
+        prev.map((d) => (d.day === dayNum ? { ...d, resources: urls } : d))
+      );
+    } catch (err) {
+      // Stale plan id (already deleted on the server) → drop local state so the saved-plans effect reseeds.
+      if (err?.response?.status === 404) {
+        setPlanId("");
+        setPlan([]);
+        setProgressByDay({});
+        setQuizByDay({});
+        setStats(null);
+      }
+    }
+  }, []);
+
+  // Open the quiz modal for one day (generates the quiz on the backend if not cached).
   const openDayQuiz = async (dayNum) => {
     if (!planId) return;
     setQuizModalDay(dayNum);
@@ -301,6 +440,7 @@ function App() {
     }
   };
 
+  // Reset all quiz-modal state and close it.
   const closeQuizModal = () => {
     setQuizModalDay(null);
     setQuizQuestions([]);
@@ -311,6 +451,7 @@ function App() {
     setQuizSubmitting(false);
   };
 
+  // Score a submitted quiz, persist the score, and update local quiz state.
   const handleQuizSubmit = async (questions, answers) => {
     if (!planId || quizModalDay == null) return;
     setQuizSubmitting(true);
@@ -386,7 +527,7 @@ function App() {
               />
             </label>
             <p className="user-id-hint">
-              Use the <strong>same ID</strong> every visit. Your saved roadmaps load on the <strong>Plan</strong> tab; resume opens <strong>Track</strong> with progress and quiz scores.
+              Use the <strong>same ID</strong> every visit. Open the <strong>Your Plans</strong> tab to see your saved roadmaps with live stats; <strong>Resume progress</strong> opens <strong>Track</strong> with progress and quiz scores.
             </p>
           </div>
         </section>
@@ -399,6 +540,12 @@ function App() {
             <Compass size={16} /> Plan
           </button>
           <button
+            className={activeView === "your-plans" ? "view-btn active" : "view-btn"}
+            onClick={() => setActiveView("your-plans")}
+          >
+            <History size={16} /> Your Plans
+          </button>
+          <button
             className={activeView === "track" ? "view-btn active" : "view-btn"}
             onClick={() => setActiveView("track")}
             disabled={!plan.length}
@@ -409,27 +556,31 @@ function App() {
 
         {activeView === "planner" && (
           <PlannerView
+            key={formResetKey}
             days={days}
             setDays={setDays}
             hours={hours}
             setHours={setHours}
             textInput={textInput}
             setTextInput={setTextInput}
+            pdfFile={pdfFile}
             setPdfFile={setPdfFile}
+            planName={planName}
+            setPlanName={setPlanName}
             onGeneratePlan={onGeneratePlan}
             isGenerating={isGenerating}
-            planId={planId}
-            completionPct={completionPct}
-            planLength={plan.length}
-            averageQuizPct={averageQuizPct}
-            currentStreak={stats?.current_streak ?? 0}
-            stats={stats}
             message={message}
             error={error}
+          />
+        )}
+
+        {activeView === "your-plans" && (
+          <YourPlansView
             savedPlans={savedPlans}
             savedPlansLoading={savedPlansLoading}
             onResumePlan={resumePlan}
             onRefreshSavedPlans={fetchSavedPlansForUser}
+            onDeletePlan={deletePlan}
             activePlanId={planId}
           />
         )}
@@ -449,8 +600,9 @@ function App() {
             saveDayProgress={saveDayProgress}
             saveQuizScore={saveQuizScore}
             onOpenQuiz={openDayQuiz}
+            onLoadDayResources={loadDayResources}
             quizLoadingDay={quizLoading ? quizModalDay : null}
-            hours={hours}
+            hours={planHours}
             planId={planId}
           />
         )}
