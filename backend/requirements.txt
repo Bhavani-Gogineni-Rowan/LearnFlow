@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-multipart
+google-generativeai
+pypdf2
+python-dotenv
+unstructured[pdf]
+chromadb
+instructor
+duckduckgo-search
+sqlalchemy
+psycopg2-binary
+requests
+
+
