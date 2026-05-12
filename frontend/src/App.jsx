@@ -9,7 +9,7 @@ import { QuizModal, normalizeAnswer, TOTAL as QUIZ_TOTAL } from "./components/Qu
 import "./App.css";
 
 const api = axios.create({
-  baseURL: "http://localhost:8000",
+  baseURL: import.meta.env.VITE_API_URL || "http://localhost:8000",
 });
 
 function App() {
